@@ -55,4 +55,4 @@ jobs:
           }
           EOF
 
-          oci compute instance launch --from-json "file://launch_request.json"
+          oci compute instance launch --from-json "file://launch_request.json" --subnet-id "ocid1.subnet.oc1.ap-hyderabad-1.aaaaaaaadjzw4gehq2tu4nvly57fexfmsolq67oj3kvnyed77ykejcna3yya"
