@@ -1,0 +1,53 @@
+name: OCI VM Provisioner
+
+on:
+  schedule:
+    - cron: '*/10 * * * *' # Runs every 10 minutes automatically
+  workflow_dispatch: # Allows you to trigger it manually anytime with a click
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up OCI CLI
+        uses: oracle-actions/setup-oci-cli@v1
+
+      - name: Configure OCI Credentials & SSH Key
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_USER_ID }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_TENANCY_ID }}" >> ~/.oci/config
+          echo "region=ap-hyderabad-1" >> ~/.oci/config
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+
+      - name: Run OCI Instance Launch
+        run: |
+          cat << 'EOF' > launch_request.json
+          {
+            "availabilityDomain": "AP-HYDERABAD-1-AD-1",
+            "compartmentId": "${{ secrets.OCI_TENANCY_ID }}",
+            "shape": "VM.Standard.A1.Flex",
+            "shapeConfig": {
+              "ocpus": 2,
+              "memoryInGBs": 12
+            },
+            "imageId": "ocid1.image.oc1.ap-hyderabad-1.aaaaaaaaxa7c32msqiu4ueamqtpl6oz4gqfs7vd5tbro64nyyi6qkoor4w6a",
+            "displayName": "arm-free-vm",
+            "createVnicDetails": {
+              "subnetId": "ocid1.subnet.oc1.ap-hyderabad-1.aaaaaaaadjzw4gehq2tu4nvly57fexfmsolq67oj3kvnyed77ykejcna3yya"
+            },
+            "metadata": {
+              "ssh_authorized_keys": "${{ secrets.SSH_PUBLIC_KEY }}"
+            }
+          }
+          EOF
+
+          oci compute instance launch --from-json "file://launch_request.json"
