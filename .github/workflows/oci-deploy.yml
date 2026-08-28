@@ -82,7 +82,10 @@ jobs:
               "ocpus": ${OCPUS},
               "memoryInGBs": ${MEMORY_GB}
             },
-            "imageId": "${{ secrets.OCI_IMAGE_ID }}",
+            "sourceDetails": {
+              "sourceType": "image",
+              "imageId": "${{ secrets.OCI_IMAGE_ID }}"
+            },
             "displayName": "${DISPLAY_NAME}",
             "createVnicDetails": {
               "subnetId": "${{ secrets.OCI_SUBNET_ID }}",
