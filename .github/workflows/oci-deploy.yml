@@ -72,30 +72,39 @@ jobs:
 
       - name: Build launch request
         if: steps.check.outputs.exists == 'false'
+        env:
+          COMPARTMENT_ID: ${{ secrets.OCI_TENANCY_ID }}
+          IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          SSH_PUB_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
         run: |
-          cat > launch_request.json << EOF
-          {
-            "availabilityDomain": "${AVAILABILITY_DOMAIN}",
-            "compartmentId": "${{ secrets.OCI_TENANCY_ID }}",
-            "shape": "${SHAPE}",
-            "shapeConfig": {
-              "ocpus": ${OCPUS},
-              "memoryInGBs": ${MEMORY_GB}
-            },
-            "sourceDetails": {
-              "sourceType": "image",
-              "imageId": "${{ secrets.OCI_IMAGE_ID }}"
-            },
-            "displayName": "${DISPLAY_NAME}",
-            "createVnicDetails": {
-              "subnetId": "${{ secrets.OCI_SUBNET_ID }}",
-              "assignPublicIp": true
-            },
-            "metadata": {
-              "ssh_authorized_keys": "${{ secrets.SSH_PUBLIC_KEY }}"
-            }
-          }
-          EOF
+          sudo apt-get update -qq && sudo apt-get install -y jq
+          # Build JSON with jq instead of a heredoc — jq safely escapes
+          # newlines/quotes in secret values, avoiding malformed JSON
+          # (e.g. a trailing newline on the SSH key breaking the request).
+          jq -n \
+            --arg ad "$AVAILABILITY_DOMAIN" \
+            --arg compartment "$COMPARTMENT_ID" \
+            --arg shape "$SHAPE" \
+            --argjson ocpus "$OCPUS" \
+            --argjson mem "$MEMORY_GB" \
+            --arg image "$IMAGE_ID" \
+            --arg name "$DISPLAY_NAME" \
+            --arg subnet "$SUBNET_ID" \
+            --arg sshkey "$SSH_PUB_KEY" \
+            '{
+              availabilityDomain: $ad,
+              compartmentId: $compartment,
+              shape: $shape,
+              shapeConfig: { ocpus: $ocpus, memoryInGBs: $mem },
+              sourceDetails: { sourceType: "image", imageId: $image },
+              displayName: $name,
+              createVnicDetails: { subnetId: $subnet, assignPublicIp: true },
+              metadata: { ssh_authorized_keys: $sshkey }
+            }' > launch_request.json
+
+          echo "--- launch_request.json (validated) ---"
+          jq . launch_request.json
 
       - name: Launch instance
         if: steps.check.outputs.exists == 'false'
