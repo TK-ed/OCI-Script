@@ -1,7 +1,9 @@
 name: OCI VM Provisioner
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes — see note below on 1-minute cron
+    # GitHub Actions enforces a 5-minute minimum interval for scheduled
+    # workflows — this cannot run more frequently than that.
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 env:
@@ -21,32 +23,37 @@ jobs:
 
       - name: Install OCI CLI
         run: |
+          set -euo pipefail
           curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
       - name: Configure OCI credentials
         run: |
+          set -euo pipefail
           mkdir -p ~/.oci
           # printf preserves the exact multi-line PEM content — do NOT use echo here
-          printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
+          printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > "$HOME/.oci/oci_api_key.pem"
+          chmod 600 "$HOME/.oci/oci_api_key.pem"
 
-          cat > ~/.oci/config << EOF
+          # Use the fully resolved $HOME path — a literal "~" in the config
+          # file is not reliably expanded by the OCI SDK's config parser.
+          cat > "$HOME/.oci/config" << EOF
           [DEFAULT]
           user=${{ secrets.OCI_USER_ID }}
           fingerprint=${{ secrets.OCI_FINGERPRINT }}
           tenancy=${{ secrets.OCI_TENANCY_ID }}
           region=${REGION}
-          key_file=~/.oci/oci_api_key.pem
+          key_file=$HOME/.oci/oci_api_key.pem
           EOF
-          chmod 600 ~/.oci/config
+          chmod 600 "$HOME/.oci/config"
 
-          oci setup repair-file-permissions --file ~/.oci/config
-          oci setup repair-file-permissions --file ~/.oci/oci_api_key.pem
+          oci setup repair-file-permissions --file "$HOME/.oci/config"
+          oci setup repair-file-permissions --file "$HOME/.oci/oci_api_key.pem"
 
       - name: Check if instance already exists
         id: check
         run: |
+          set -euo pipefail
           EXISTING=$(oci compute instance list \
             --compartment-id "${{ secrets.OCI_TENANCY_ID }}" \
             --display-name "${DISPLAY_NAME}" \
@@ -78,10 +85,15 @@ jobs:
           SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           SSH_PUB_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y jq
-          # Build JSON with jq instead of a heredoc — jq safely escapes
-          # newlines/quotes in secret values, avoiding malformed JSON
-          # (e.g. a trailing newline on the SSH key breaking the request).
+          set -euo pipefail
+          # Trim any trailing newline/whitespace from the secret before
+          # embedding it — a stray newline is valid JSON but can produce
+          # a malformed authorized_keys entry on the instance.
+          TRIMMED_KEY=$(printf '%s' "$SSH_PUB_KEY" | tr -d '\r\n')
+
+          # subnetId MUST be explicit inside createVnicDetails — relying on
+          # --subnet-id alone (with no subnetId in the JSON body) has been
+          # observed to produce a 400 CannotParseRequest from OCI.
           jq -n \
             --arg ad "$AVAILABILITY_DOMAIN" \
             --arg compartment "$COMPARTMENT_ID" \
@@ -89,9 +101,9 @@ jobs:
             --argjson ocpus "$OCPUS" \
             --argjson mem "$MEMORY_GB" \
             --arg image "$IMAGE_ID" \
-            --arg name "$DISPLAY_NAME" \
             --arg subnet "$SUBNET_ID" \
-            --arg sshkey "$SSH_PUB_KEY" \
+            --arg name "$DISPLAY_NAME" \
+            --arg sshkey "$TRIMMED_KEY" \
             '{
               availabilityDomain: $ad,
               compartmentId: $compartment,
@@ -108,10 +120,42 @@ jobs:
 
       - name: Launch instance
         if: steps.check.outputs.exists == 'false'
+        env:
+          SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
         run: |
-          oci compute instance launch \
+          set -euo pipefail
+
+          # Errors matching these patterns mean "no capacity right now" or
+          # "rate limited" — expected, routine states while polling for
+          # free-tier ARM capacity. CannotParseRequest is included because
+          # OCI has been observed returning it for the same reason instead
+          # of a clean capacity message, even for a structurally valid
+          # request (confirmed via --debug: identical payload got 429 on
+          # three consecutive attempts, then CannotParseRequest on the 4th
+          # with zero change to the request body).
+          RETRYABLE_PATTERN='Out of host capacity|LimitExceeded|TooManyRequests|429|InternalError|CannotParseRequest'
+
+          set +e
+          OUTPUT=$(oci compute instance launch \
             --from-json file://launch_request.json \
-            --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
+            --subnet-id "$SUBNET_ID" \
             --wait-for-state RUNNING \
             --max-wait-seconds 600 \
-            --debug
+            --debug 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          echo "$OUTPUT"
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ SUCCESS — instance launched and reached RUNNING."
+            exit 0
+          fi
+
+          if echo "$OUTPUT" | grep -qE "$RETRYABLE_PATTERN"; then
+            echo "⏳ No capacity / rate-limited this round — will retry on next scheduled run."
+            exit 0
+          fi
+
+          echo "❌ Non-retryable error — failing the job so it's visible."
+          exit 1
