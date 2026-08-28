@@ -99,6 +99,7 @@ jobs:
         run: |
           oci compute instance launch \
             --from-json file://launch_request.json \
+            --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
             --wait-for-state RUNNING \
             --max-wait-seconds 600 \
             --debug
