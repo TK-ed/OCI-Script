@@ -1,9 +1,16 @@
 name: OCI VM Provisioner
-
 on:
   schedule:
-    - cron: '* * * * *' # Runs every 1 minute automatically
+    - cron: '*/5 * * * *'   # every 5 minutes — see note below on 1-minute cron
   workflow_dispatch:
+
+env:
+  DISPLAY_NAME: arm-free-vm
+  REGION: ap-hyderabad-1
+  AVAILABILITY_DOMAIN: AP-HYDERABAD-1-AD-1
+  SHAPE: VM.Standard.A1.Flex
+  OCPUS: 2
+  MEMORY_GB: 12
 
 jobs:
   deploy:
@@ -15,39 +22,71 @@ jobs:
       - name: Install OCI CLI
         run: |
           curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
-          echo "$HOME/bin" >> $GITHUB_PATH
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Configure OCI Credentials & SSH Key
+      - name: Configure OCI credentials
         run: |
           mkdir -p ~/.oci
-          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+          # printf preserves the exact multi-line PEM content — do NOT use echo here
+          printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          echo "[DEFAULT]" > ~/.oci/config
-          echo "user=${{ secrets.OCI_USER_ID }}" >> ~/.oci/config
-          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
-          echo "tenancy=${{ secrets.OCI_TENANCY_ID }}" >> ~/.oci/config
-          echo "region=ap-hyderabad-1" >> ~/.oci/config
-          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+          cat > ~/.oci/config << EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_ID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY_ID }}
+          region=${REGION}
+          key_file=~/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
 
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > ~/.ssh/id_ed25519.pub
+          oci setup repair-file-permissions --file ~/.oci/config
+          oci setup repair-file-permissions --file ~/.oci/oci_api_key.pem
 
-      - name: Run OCI Instance Launch
+      - name: Check if instance already exists
+        id: check
         run: |
-          cat << 'EOF' > launch_request.json
+          EXISTING=$(oci compute instance list \
+            --compartment-id "${{ secrets.OCI_TENANCY_ID }}" \
+            --display-name "${DISPLAY_NAME}" \
+            --lifecycle-state RUNNING \
+            --query "data[0].id" --raw-output 2>/dev/null || true)
+
+          # also treat PROVISIONING/STARTING as "already in progress"
+          if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
+            EXISTING=$(oci compute instance list \
+              --compartment-id "${{ secrets.OCI_TENANCY_ID }}" \
+              --display-name "${DISPLAY_NAME}" \
+              --query "data[?\"lifecycle-state\"=='PROVISIONING' || \"lifecycle-state\"=='STARTING'].id | [0]" \
+              --raw-output 2>/dev/null || true)
+          fi
+
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+            echo "Instance already exists or is being created: $EXISTING — skipping launch."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No existing instance found — will attempt launch."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build launch request
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          cat > launch_request.json << EOF
           {
-            "availabilityDomain": "AP-HYDERABAD-1-AD-1",
+            "availabilityDomain": "${AVAILABILITY_DOMAIN}",
             "compartmentId": "${{ secrets.OCI_TENANCY_ID }}",
-            "shape": "VM.Standard.A1.Flex",
+            "shape": "${SHAPE}",
             "shapeConfig": {
-              "ocpus": 2,
-              "memoryInGBs": 12
+              "ocpus": ${OCPUS},
+              "memoryInGBs": ${MEMORY_GB}
             },
-            "imageId": "ocid1.image.oc1.ap-hyderabad-1.aaaaaaaaxa7c32msqiu4ueamqtpl6oz4gqfs7vd5tbro64nyyi6qkoor4w6a",
-            "displayName": "arm-free-vm",
+            "imageId": "${{ secrets.OCI_IMAGE_ID }}",
+            "displayName": "${DISPLAY_NAME}",
             "createVnicDetails": {
-              "subnetId": "ocid1.subnet.oc1.ap-hyderabad-1.aaaaaaaadjzw4gehq2tu4nvly57fexfmsolq67oj3kvnyed77ykejcna3yya"
+              "subnetId": "${{ secrets.OCI_SUBNET_ID }}",
+              "assignPublicIp": true
             },
             "metadata": {
               "ssh_authorized_keys": "${{ secrets.SSH_PUBLIC_KEY }}"
@@ -55,4 +94,11 @@ jobs:
           }
           EOF
 
-          oci compute instance launch --from-json "file://launch_request.json" --subnet-id "ocid1.subnet.oc1.ap-hyderabad-1.aaaaaaaadjzw4gehq2tu4nvly57fexfmsolq67oj3kvnyed77ykejcna3yya"
+      - name: Launch instance
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          oci compute instance launch \
+            --from-json file://launch_request.json \
+            --wait-for-state RUNNING \
+            --max-wait-seconds 600 \
+            --debug
