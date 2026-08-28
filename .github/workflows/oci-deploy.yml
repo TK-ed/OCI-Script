@@ -3,7 +3,7 @@ on:
   schedule:
     # GitHub Actions enforces a 5-minute minimum interval for scheduled
     # workflows — this cannot run more frequently than that.
-    - cron: '*/5 * * * *'
+   - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
   workflow_dispatch:
 
 env:
@@ -139,8 +139,6 @@ jobs:
           OUTPUT=$(oci compute instance launch \
             --from-json file://launch_request.json \
             --subnet-id "$SUBNET_ID" \
-            --wait-for-state RUNNING \
-            --max-wait-seconds 600 \
             --debug 2>&1)
           EXIT_CODE=$?
           set -e
